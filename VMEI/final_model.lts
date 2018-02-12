@@ -1,0 +1,378 @@
+const False = 0
+const True = 1
+
+range Bool = 0..1
+range Lanes = 0..3
+range Turn = 0..1 // 0 = go straight, 1= go right
+range Count = 0..15 // I will show why this number is set to 15 below
+
+/* This is the layout of the intersection for this model
+
+        lane0   x
+
+    x   grid0  grid1   lane1
+
+ lane2  grid2  grid3   x
+
+         x   lane3
+
+
+Notes on the model:
+
+Since the Wu model relies on the time the car arrived to the intersection as the primary tiebreaker when determining
+who has priority for the intersection we simplified the problem as we couldn't figure out a good way to model time in LTSA. 
+We assume all cars arrive at the exact same time. This still behaves as the Wu model would if all cars have the same time stamp.
+The best way to think of this model is in phases. Phase 1 is selecting lanes. We do not allow following so once a lane is picked no other cars
+can use that lane. After all cars have choosen a lane it moves onto phase 2. Phase 2 is sending requests to all other cars and receiving
+either permission or rejection from everyone. After every car has sent and received their initial requests it moves on to phase 3.
+Phase 3 is when the cars wait for permission and actually move through the intersection. A car will move when it has gotten permission from all other cars.
+After all cars have gone the model resets back to phase 1.
+
+We used 3 cars because the state space of 4 cars was too large. We could not run any safety/property checks without the LTSA tool
+getting an out of memory exception. It would also run for about 30 minutes before running out of memory.
+
+Notes on efficiency checking:
+
+We are checking efficiency by counting the total number of messages sent. If we look at a model that only looks at the ID to 
+determine if a request should be granted permission we get the following message count. Note this number only applies for modeling 3 cars.
+Each car initially sends a request and get a response, 2 sent, 2 received, 4 total per car. Car 2 will send 2 rejections one to car 1 and one to car 0 so it 
+is required to send 2 permissions after it leaves the intersection. Car 1 sends 1 rejection to car 0 so it is required to send one permission
+to 0 after it leaves the intersection. Car 0 never has to send permissions when it leaves the intersection. 
+
+Totals in the inefficient model:
+Phase 2: 4*3 = 12 total messages (initial messages, these are unavoidable)
+Phase 3: 2+1 = 3 total messages (permissions sent after cars leave the intersection. This is where we are more efficient)
+In the inefficient model 15 messages will always be sent assuming all 3 cars participate
+
+In our model we can guarantee that we will always send less than 15 messages. Really all we care about how many
+rejects are sent because each reject must have a follow-up permission message, but we count all messages in our check. 
+*/
+
+// All comments below are not specific to car 0, they are generallized for all cars
+
+// This process is used force every car to send their initial requests and receive their inital responses
+BROADCAST(ID=0) = (
+	choose_lane[ID][0][0]->RUN[0][0][0][0][0][0]| // lane 0 go straight
+	choose_lane[ID][0][1]->RUN[0][0][0][0][0][1]| // lane 0 go right
+	choose_lane[ID][1][0]->RUN[0][0][0][0][1][0]| // lane 1 go straight
+	choose_lane[ID][1][1]->RUN[0][0][0][0][1][1]| // lane 1 go right
+	choose_lane[ID][2][0]->RUN[0][0][0][0][2][0]| // lane 2 go straight
+	choose_lane[ID][2][1]->RUN[0][0][0][0][2][1]| // lane 2 go right
+	choose_lane[ID][3][0]->RUN[0][0][0][0][3][0]| // lane 3 go straight
+	choose_lane[ID][3][1]->RUN[0][0][0][0][3][1]| // lane 3 go right
+	choose_lane[(ID+1)%3][0..3][0..1]->BROADCAST |
+	choose_lane[(ID+2)%3][0..3][0..1]->BROADCAST |
+	wait_out[ID]->RUN[0][0][0][0][0][0]
+),
+RUN[s1:Bool][s2:Bool][r1:Bool][r2:Bool][l:Lanes][t:Turn] = (
+	when(!s1) send_request[ID][(ID+1)%3][l][t] -> RUN[True][s2][r1][r2][l][t] |
+	when(!s2) send_request[ID][(ID+2)%3][l][t] -> RUN[s1][True][r1][r2][l][t] |
+	receive_permission[(ID+1)%3][ID] -> RUN[s1][s2][True][r2][l][t] |
+	when(!r1) receive_reject[(ID+1)%3][ID] -> RUN[s1][s2][True][r2][l][t] |
+	receive_permission[(ID+2)%3][ID] -> RUN[s1][s2][r1][True][l][t] |
+	when(!r2) receive_reject[(ID+2)%3][ID] -> RUN[s1][s2][r1][True][l][t] |
+	when(s1 && s2 && r1 && r2) done_broadcast[ID]->RUN[1][1][1][1][l][t] |
+	choose_lane[0..2][0..3][0..1]->RUN[s1][s2][r1][r2][l][t] |
+    restarting[ID]->BROADCAST
+).
+
+WU_CAR_0 = STARTUP[0][0][0][0][0][0][0][0][0][0],
+
+// Keep track of which lanes are avaialable. The nc variables keep track of lanes that have no conflics.
+// nc3 only applies if the lane is turning right. This is phase 1
+STARTUP[l0:Bool][l1:Bool][l2:Bool][l3:Bool][wait:Bool][l:Lanes][t:Turn][nc1:Lanes][nc2:Lanes][nc3:Lanes] = (
+	when(!l0 && !wait)choose_lane[0][0][0]-> STARTUP[1][1][1][1][0][0][0][3][0][1] | // lane 0 go straight
+	when(!l0 && !wait)choose_lane[0][0][1]-> STARTUP[1][1][1][1][0][0][1][3][2][1] | // lane 0 go right
+	when(!l1 && !wait)choose_lane[0][1][0]-> STARTUP[1][1][1][1][0][1][0][2][1][3] | // lane 1 go straight
+	when(!l1 && !wait)choose_lane[0][1][1]-> STARTUP[1][1][1][1][0][1][1][2][0][3] | // lane 1 go right
+	when(!l2 && !wait)choose_lane[0][2][0]-> STARTUP[1][1][1][1][0][2][0][1][2][0] | // lane 2 go straight
+	when(!l2 && !wait)choose_lane[0][2][1]-> STARTUP[1][1][1][1][0][2][1][1][3][0] | // lane 2 go right
+	when(!l3 && !wait)choose_lane[0][3][0]-> STARTUP[1][1][1][1][0][3][0][0][3][2] | // lane 3 go straight
+	when(!l3 && !wait)choose_lane[0][3][1]-> STARTUP[1][1][1][1][0][3][1][0][1][2] | // lane 3 go right
+	choose_lane[1][0][Turn] -> STARTUP[True][l1][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[2][0][Turn] -> STARTUP[True][l1][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[1][1][Turn] -> STARTUP[l0][True][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[2][1][Turn] -> STARTUP[l0][True][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[1][2][Turn] -> STARTUP[l0][l1][True][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[2][2][Turn] -> STARTUP[l0][l1][True][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[1][3][Turn] -> STARTUP[l0][l1][l2][True][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[2][3][Turn] -> STARTUP[l0][l1][l2][True][wait][l][t][nc1][nc2][nc3] |
+	when(!(l0 && l1 && l2 && l3))wait_out[0] -> STARTUP[0][0][0][0][1][l][t][nc1][nc2][nc3] |
+	when(wait) sync_startup -> WAIT_OUT | // Syncronization for phase 1
+	when(l0 && l1 && l2)sync_startup->WAIT_RESPONSE[1][1][0][0][l][t][nc1][nc2][nc3]
+),
+// End of phase 1
+WAIT_OUT = (
+	receive_request[1][0][Lanes][Turn] -> send_permission[0][1] -> WAIT_OUT |
+	receive_request[2][0][Lanes][Turn] -> send_permission[0][2] -> WAIT_OUT |
+	sync -> CLEANUP[0][0]
+),
+WAIT_RESPONSE[hl1:Bool][hl2:Bool][ll1:Bool][ll2:Bool][l:Lanes][t:Turn][nc1:Lanes][nc2:Lanes][nc3:Lanes] = (
+			// Send permission to any request that does not have a lane conflict or if it's ID outranks 
+			// 2 outranks 1 and 0, 1 outranks 0, 0 outranks nobody 
+			receive_request[1][0][ln:Lanes][tn:Turn] -> if hl1 || (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+											then (send_permission[0][1] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+											else (send_reject[0][1] -> WAIT_RESPONSE[hl1][hl2][True][ll2][l][t][nc1][nc2][nc3]) |
+			receive_request[2][0][ln:Lanes][tn:Turn] -> if hl2 || (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+											then (send_permission[0][2] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+											else (send_reject[0][2] -> WAIT_RESPONSE[hl1][hl2][ll1][True][l][t][nc1][nc2][nc3]) |
+			send_request[0][1][l][t] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			send_request[0][2][l][t] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_permission[1][0] -> WAIT_RESPONSE[False][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_permission[2][0] -> WAIT_RESPONSE[hl1][False][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_reject[1][0] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_reject[2][0] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+
+			done_broadcast[0] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3]),
+
+WAIT_FOR_EVERYONE[hl1:Bool][hl2:Bool][ll1:Bool][ll2:Bool][l:Lanes][t:Turn][nc1:Lanes][nc2:Lanes][nc3:Lanes] = (
+	receive_request[1][0][ln:Lanes][tn:Turn] -> if hl1 || (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+									then (send_permission[0][1] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+									else (send_reject[0][1] -> WAIT_FOR_EVERYONE[hl1][hl2][True][ll2][l][t][nc1][nc2][nc3]) |
+	receive_request[2][0][ln:Lanes][tn:Turn] -> if hl2 || (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+									then (send_permission[0][2] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+									else (send_reject[0][2] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][True][l][t][nc1][nc2][nc3]) |
+	sync -> WAIT_PERMISSION[hl1][hl2][ll1][ll2][l][t]
+),
+// End of phase 2
+WAIT_PERMISSION[hl1:Bool][hl2:Bool][ll1:Bool][ll2:Bool][l:Lanes][t:Turn] = (
+			when(!hl1 && !hl2) enter[0] -> CRITICAL[ll1][ll2][l][t] |
+			when(hl1) receive_permission[1][0] -> WAIT_PERMISSION[False][hl2][ll1][ll2][l][t] |
+			when(hl2) receive_permission[2][0] -> WAIT_PERMISSION[hl1][False][ll1][ll2][l][t]
+		),
+CRITICAL[ll1:Bool][ll2:Bool][l:Lanes][t:Turn] = (
+	// Modeling the grid here
+	when(l==0 && t == 0) grid[0][0]->grid[0][2]->exit[0]->CLEANUP[ll1][ll2]| // lane 0 go straight		
+	when(l==0 && t == 1) grid[0][0]->exit[0]->CLEANUP[ll1][ll2]| // lane 0 go right
+	when(l==1 && t == 0) grid[0][1]->grid[0][0]->exit[0]->CLEANUP[ll1][ll2]| // lane 1 go straight
+	when(l==1 && t == 1) grid[0][1]->exit[0]->CLEANUP[ll1][ll2]| // lane 1 go right
+	when(l==2 && t == 0) grid[0][2]->grid[0][3]->exit[0]->CLEANUP[ll1][ll2]| // lane 2 go straight
+	when(l==2 && t == 1) grid[0][2]->exit[0]->CLEANUP[ll1][ll2]| // lane 2 go right
+	when(l==3 && t == 0) grid[0][3]->grid[0][1]->exit[0]->CLEANUP[ll1][ll2]| // lane 3 go straight
+	when(l==3 && t == 1) grid[0][3]->exit[0]->CLEANUP[ll1][ll2] // lane 3 go right
+),
+CLEANUP[ll1:Bool][ll2:Bool] = (
+			when(!ll1 && !ll2) restarting[0] -> sync_restart -> STARTUP[0][0][0][0][0][0][0][0][0][0] |
+			when(ll1) send_permission[0][1] -> CLEANUP[False][ll2] |
+			when(ll2) send_permission[0][2] -> CLEANUP[ll1][False]
+		).
+// End of phase 3
+WU_CAR_1 = STARTUP[0][0][0][0][0][0][0][0][0][0],
+
+STARTUP[l0:Bool][l1:Bool][l2:Bool][l3:Bool][wait:Bool][l:Lanes][t:Turn][nc1:Lanes][nc2:Lanes][nc3:Lanes] = (
+	when(!l0 && !wait)choose_lane[1][0][0]-> STARTUP[1][1][1][1][0][0][0][3][0][1] | // lane 0 go straight
+	when(!l0 && !wait)choose_lane[1][0][1]-> STARTUP[1][1][1][1][0][0][1][3][2][1] | // lane 0 go right
+	when(!l1 && !wait)choose_lane[1][1][0]-> STARTUP[1][1][1][1][0][1][0][2][1][3] | // lane 1 go straight
+	when(!l1 && !wait)choose_lane[1][1][1]-> STARTUP[1][1][1][1][0][1][1][2][0][3] | // lane 1 go right
+	when(!l2 && !wait)choose_lane[1][2][0]-> STARTUP[1][1][1][1][0][2][0][1][2][0] | // lane 2 go straight
+	when(!l2 && !wait)choose_lane[1][2][1]-> STARTUP[1][1][1][1][0][2][1][1][3][0] | // lane 2 go right
+	when(!l3 && !wait)choose_lane[1][3][0]-> STARTUP[1][1][1][1][0][3][0][0][3][2] | // lane 3 go straight
+	when(!l3 && !wait)choose_lane[1][3][1]-> STARTUP[1][1][1][1][0][3][1][0][1][2] | // lane 3 go right
+	choose_lane[0][0][Turn] -> STARTUP[True][l1][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[2][0][Turn] -> STARTUP[True][l1][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[0][1][Turn] -> STARTUP[l0][True][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[2][1][Turn] -> STARTUP[l0][True][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[0][2][Turn] -> STARTUP[l0][l1][True][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[2][2][Turn] -> STARTUP[l0][l1][True][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[0][3][Turn] -> STARTUP[l0][l1][l2][True][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[2][3][Turn] -> STARTUP[l0][l1][l2][True][wait][l][t][nc1][nc2][nc3] |
+	when(!(l0 && l1 && l2 && l3))wait_out[1] -> STARTUP[0][0][0][0][1][l][t][nc1][nc2][nc3] |
+	when(wait) sync_startup -> WAIT_OUT |
+	when(l0 && l1 && l2)sync_startup->WAIT_RESPONSE[1][1][0][0][l][t][nc1][nc2][nc3]
+),
+WAIT_OUT = (
+	receive_request[0][1][Lanes][Turn] -> send_permission[1][0] -> WAIT_OUT |
+	receive_request[2][1][Lanes][Turn] -> send_permission[1][2] -> WAIT_OUT |
+	sync -> CLEANUP[0][0]
+),
+WAIT_RESPONSE[hl1:Bool][hl2:Bool][ll1:Bool][ll2:Bool][l:Lanes][t:Turn][nc1:Lanes][nc2:Lanes][nc3:Lanes] = (
+			receive_request[0][1][ln:Lanes][tn:Turn] -> if (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+											then (send_permission[1][0] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+											else (send_reject[1][0] -> WAIT_RESPONSE[hl1][hl2][True][ll2][l][t][nc1][nc2][nc3]) |
+			receive_request[2][1][ln:Lanes][tn:Turn] -> if hl2 || (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+											then (send_permission[1][2] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+											else (send_reject[1][2] -> WAIT_RESPONSE[hl1][hl2][ll1][True][l][t][nc1][nc2][nc3]) |
+			send_request[1][0][l][t] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			send_request[1][2][l][t] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_permission[0][1] -> WAIT_RESPONSE[False][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_permission[2][1] -> WAIT_RESPONSE[hl1][False][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_reject[0][1] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_reject[2][1] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+
+			done_broadcast[1] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3]),
+
+WAIT_FOR_EVERYONE[hl1:Bool][hl2:Bool][ll1:Bool][ll2:Bool][l:Lanes][t:Turn][nc1:Lanes][nc2:Lanes][nc3:Lanes] = (
+	receive_request[0][1][ln:Lanes][tn:Turn] -> if (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+									then (send_permission[1][0] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+									else (send_reject[1][0] -> WAIT_FOR_EVERYONE[hl1][hl2][True][ll2][l][t][nc1][nc2][nc3]) |
+	receive_request[2][1][ln:Lanes][tn:Turn] -> if hl2 || (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+									then (send_permission[1][2] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+									else (send_reject[1][2] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][True][l][t][nc1][nc2][nc3]) |
+	sync -> WAIT_PERMISSION[hl1][hl2][ll1][ll2][l][t]
+),
+WAIT_PERMISSION[hl1:Bool][hl2:Bool][ll1:Bool][ll2:Bool][l:Lanes][t:Turn] = (
+			when(!hl1 && !hl2) enter[1] -> CRITICAL[ll1][ll2][l][t] |
+			when(hl1) receive_permission[0][1] -> WAIT_PERMISSION[False][hl2][ll1][ll2][l][t] |
+			when(hl2) receive_permission[2][1] -> WAIT_PERMISSION[hl1][False][ll1][ll2][l][t]
+		),
+CRITICAL[ll1:Bool][ll2:Bool][l:Lanes][t:Turn] = (
+	// Modeling the grid here
+	when(l==0 && t == 0) grid[1][0]->grid[1][2]->exit[1]->CLEANUP[ll1][ll2]| // lane 0 go straight		
+	when(l==0 && t == 1) grid[1][0]->exit[1]->CLEANUP[ll1][ll2]| // lane 0 go right
+	when(l==1 && t == 0) grid[1][1]->grid[1][0]->exit[1]->CLEANUP[ll1][ll2]| // lane 1 go straight
+	when(l==1 && t == 1) grid[1][1]->exit[1]->CLEANUP[ll1][ll2]| // lane 1 go right
+	when(l==2 && t == 0) grid[1][2]->grid[1][3]->exit[1]->CLEANUP[ll1][ll2]| // lane 2 go straight
+	when(l==2 && t == 1) grid[1][2]->exit[1]->CLEANUP[ll1][ll2]| // lane 2 go right
+	when(l==3 && t == 0) grid[1][3]->grid[1][1]->exit[1]->CLEANUP[ll1][ll2]| // lane 3 go straight
+	when(l==3 && t == 1) grid[1][3]->exit[1]->CLEANUP[ll1][ll2] // lane 3 go right
+),
+CLEANUP[ll1:Bool][ll2:Bool] = (
+			when(!ll1 && !ll2) restarting[1] -> sync_restart -> STARTUP[0][0][0][0][0][0][0][0][0][0] |
+			when(ll1) send_permission[1][0] -> CLEANUP[False][ll2] |
+			when(ll2) send_permission[1][2] -> CLEANUP[ll1][False]
+		).
+
+WU_CAR_2 = STARTUP[0][0][0][0][0][0][0][0][0][0],
+
+STARTUP[l0:Bool][l1:Bool][l2:Bool][l3:Bool][wait:Bool][l:Lanes][t:Turn][nc1:Lanes][nc2:Lanes][nc3:Lanes] = (
+	when(!l0 && !wait)choose_lane[2][0][0]-> STARTUP[1][1][1][1][0][0][0][3][0][1] | // lane 0 go straight
+	when(!l0 && !wait)choose_lane[2][0][1]-> STARTUP[1][1][1][1][0][0][1][3][2][1] | // lane 0 go right
+	when(!l1 && !wait)choose_lane[2][1][0]-> STARTUP[1][1][1][1][0][1][0][2][1][3] | // lane 1 go straight
+	when(!l1 && !wait)choose_lane[2][1][1]-> STARTUP[1][1][1][1][0][1][1][2][0][3] | // lane 1 go right
+	when(!l2 && !wait)choose_lane[2][2][0]-> STARTUP[1][1][1][1][0][2][0][1][2][0] | // lane 2 go straight
+	when(!l2 && !wait)choose_lane[2][2][1]-> STARTUP[1][1][1][1][0][2][1][1][3][0] | // lane 2 go right
+	when(!l3 && !wait)choose_lane[2][3][0]-> STARTUP[1][1][1][1][0][3][0][0][3][2] | // lane 3 go straight
+	when(!l3 && !wait)choose_lane[2][3][1]-> STARTUP[1][1][1][1][0][3][1][0][1][2] | // lane 3 go right
+	choose_lane[0][0][Turn] -> STARTUP[True][l1][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[1][0][Turn] -> STARTUP[True][l1][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[0][1][Turn] -> STARTUP[l0][True][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[1][1][Turn] -> STARTUP[l0][True][l2][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[0][2][Turn] -> STARTUP[l0][l1][True][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[1][2][Turn] -> STARTUP[l0][l1][True][l3][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[0][3][Turn] -> STARTUP[l0][l1][l2][True][wait][l][t][nc1][nc2][nc3] |
+	choose_lane[1][3][Turn] -> STARTUP[l0][l1][l2][True][wait][l][t][nc1][nc2][nc3] |
+	when(!(l0 && l1 && l2 && l3))wait_out[2] -> STARTUP[0][0][0][0][1][l][t][nc1][nc2][nc3] |
+	when(wait) sync_startup -> WAIT_OUT |
+	when(l0 && l1 && l2)sync_startup->WAIT_RESPONSE[1][1][0][0][l][t][nc1][nc2][nc3]
+),
+WAIT_OUT = (
+	receive_request[0][2][Lanes][Turn] -> send_permission[2][0] -> WAIT_OUT |
+	receive_request[1][2][Lanes][Turn] -> send_permission[2][1] -> WAIT_OUT |
+	sync -> CLEANUP[0][0]
+),
+WAIT_RESPONSE[hl1:Bool][hl2:Bool][ll1:Bool][ll2:Bool][l:Lanes][t:Turn][nc1:Lanes][nc2:Lanes][nc3:Lanes] = (
+			receive_request[0][2][ln:Lanes][tn:Turn] -> if (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+											then (send_permission[2][0] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+											else (send_reject[2][0] -> WAIT_RESPONSE[hl1][hl2][True][ll2][l][t][nc1][nc2][nc3]) |
+			receive_request[1][2][ln:Lanes][tn:Turn] -> if (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+											then (send_permission[2][1] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+											else (send_reject[2][1] -> WAIT_RESPONSE[hl1][hl2][ll1][True][l][t][nc1][nc2][nc3]) |
+			send_request[2][0][l][t] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			send_request[2][1][l][t] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_permission[0][2] -> WAIT_RESPONSE[False][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_permission[1][2] -> WAIT_RESPONSE[hl1][False][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_reject[0][2] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+			receive_reject[1][2] -> WAIT_RESPONSE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3] |
+
+			done_broadcast[2] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3]),
+
+WAIT_FOR_EVERYONE[hl1:Bool][hl2:Bool][ll1:Bool][ll2:Bool][l:Lanes][t:Turn][nc1:Lanes][nc2:Lanes][nc3:Lanes] = (
+	receive_request[0][2][ln:Lanes][tn:Turn] -> if (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+									then (send_permission[2][0] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+									else (send_reject[2][0] -> WAIT_FOR_EVERYONE[hl1][hl2][True][ll2][l][t][nc1][nc2][nc3]) |
+	receive_request[1][2][ln:Lanes][tn:Turn] -> if (tn==1 && ln==nc3) || (ln==nc1 || ln==nc2)
+									then (send_permission[2][1] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][ll2][l][t][nc1][nc2][nc3])
+									else (send_reject[2][1] -> WAIT_FOR_EVERYONE[hl1][hl2][ll1][True][l][t][nc1][nc2][nc3]) |
+	sync -> WAIT_PERMISSION[hl1][hl2][ll1][ll2][l][t]
+),
+WAIT_PERMISSION[hl1:Bool][hl2:Bool][ll1:Bool][ll2:Bool][l:Lanes][t:Turn] = (
+			when(!hl1 && !hl2) enter[2] -> CRITICAL[ll1][ll2][l][t] |
+			when(hl1) receive_permission[0][2] -> WAIT_PERMISSION[False][hl2][ll1][ll2][l][t] |
+			when(hl2) receive_permission[1][2] -> WAIT_PERMISSION[hl1][False][ll1][ll2][l][t]
+		),
+CRITICAL[ll1:Bool][ll2:Bool][l:Lanes][t:Turn] = (
+	// Modeling the grid here
+	when(l==0 && t == 0) grid[2][0]->grid[2][2]->exit[2]->CLEANUP[ll1][ll2]| // lane 0 go straight		
+	when(l==0 && t == 1) grid[2][0]->exit[2]->CLEANUP[ll1][ll2]| // lane 0 go right
+	when(l==1 && t == 0) grid[2][1]->grid[2][0]->exit[2]->CLEANUP[ll1][ll2]| // lane 1 go straight
+	when(l==1 && t == 1) grid[2][1]->exit[2]->CLEANUP[ll1][ll2]| // lane 1 go right
+	when(l==2 && t == 0) grid[2][2]->grid[2][3]->exit[2]->CLEANUP[ll1][ll2]| // lane 2 go straight
+	when(l==2 && t == 1) grid[2][2]->exit[2]->CLEANUP[ll1][ll2]| // lane 2 go right
+	when(l==3 && t == 0) grid[2][3]->grid[2][1]->exit[2]->CLEANUP[ll1][ll2]| // lane 3 go straight
+	when(l==3 && t == 1) grid[2][3]->exit[2]->CLEANUP[ll1][ll2] // lane 3 go right
+),
+CLEANUP[ll1:Bool][ll2:Bool] = (
+			when(!ll1 && !ll2) restarting[2] -> sync_restart -> STARTUP[0][0][0][0][0][0][0][0][0][0] |
+			when(ll1) send_permission[2][0] -> CLEANUP[False][ll2] |
+			when(ll2) send_permission[2][1] -> CLEANUP[ll1][False]
+		).
+
+// Message counting process
+EFFICIENCY_CHECK = MESSAGE_COUNTER[0],
+MESSAGE_COUNTER[c:Count] = (
+	when(c<15)receive_request[0][1][Lanes][Turn]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_request[0][2][Lanes][Turn]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_request[1][0][Lanes][Turn]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_request[1][2][Lanes][Turn]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_request[2][0][Lanes][Turn]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_request[2][1][Lanes][Turn]->MESSAGE_COUNTER[c+1] |
+	
+	when(c<15)receive_reject[0][1]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_reject[0][2]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_reject[1][0]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_reject[1][2]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_reject[2][0]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_reject[2][1]->MESSAGE_COUNTER[c+1] |
+
+	when(c<15)receive_permission[0][1]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_permission[0][2]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_permission[1][0]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_permission[1][2]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_permission[2][0]->MESSAGE_COUNTER[c+1] |
+	when(c<15)receive_permission[2][1]->MESSAGE_COUNTER[c+1] |
+
+	message_count[c]->MESSAGE_COUNTER[c] |
+	sync_restart->EFFICIENCY_CHECK
+).
+
+||VMEI = (WU_CAR_0 || BROADCAST(0) || WU_CAR_1 || BROADCAST(1) || WU_CAR_2 || BROADCAST(2) || EFFICIENCY_CHECK)
+/{forall[i:Lanes]{forall[j:0..2]{forall[y:0..2]{receive_request[j][(j+y)%3][i]/send_request[j][(j+y)%3][i],
+   receive_reject[j][y]/send_reject[j][y],
+   receive_permission[j][y]/send_permission[j][y]}}}}.
+
+// Properties
+
+// Safety 
+fluent CAR_0_GRID_0 = <grid[0][0], exit[0]>
+fluent CAR_1_GRID_0 = <grid[1][0], exit[1]>
+fluent CAR_2_GRID_0 = <grid[2][0], exit[2]>
+
+fluent CAR_0_GRID_1 = <grid[0][1], exit[0]>
+fluent CAR_1_GRID_1 = <grid[1][1], exit[1]>
+fluent CAR_2_GRID_1 = <grid[2][1], exit[2]>
+
+fluent CAR_0_GRID_2 = <grid[0][2], exit[0]>
+fluent CAR_1_GRID_2 = <grid[1][2], exit[1]>
+fluent CAR_2_GRID_2 = <grid[2][2], exit[2]>
+
+fluent CAR_0_GRID_3 = <grid[0][3], exit[0]>
+fluent CAR_1_GRID_3 = <grid[1][3], exit[1]>
+fluent CAR_2_GRID_3 = <grid[2][3], exit[2]>
+
+
+
+assert NO_COLLISION = []!((CAR_0_GRID_0 && CAR_1_GRID_0 && CAR_2_GRID_0) ||
+						  (CAR_0_GRID_1 && CAR_1_GRID_1 && CAR_2_GRID_1) ||
+					      (CAR_0_GRID_2 && CAR_1_GRID_2 && CAR_2_GRID_2) ||
+					      (CAR_0_GRID_3 && CAR_1_GRID_3 && CAR_2_GRID_3))
+
+// Efficiency
+// Check that we never send 15 messages (15 is the number of messages sent in the inefficient model)
+fluent MAX_MESSAGES = <message_count[15], sync_restart>
+assert IS_EFFICIENT = []!(MAX_MESSAGES)
+
+// Liveness
+// Make sure each car eventually goes
+progress CAR_0_ENTER = {enter[0]}
+progress CAR_1_ENTER = {enter[1]}
+progress CAR_2_ENTER = {enter[2]}

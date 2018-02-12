@@ -1,0 +1,50 @@
+const False = 0
+const True = 1
+
+range Bool = 0..1
+
+range Cars = 1..4
+
+range Lanes = 1..1
+/*
+        qz1   x
+
+    x   cz1  cz2   qz2
+
+   qz4  cz3  cz4   x
+
+         x  qz3
+
+*/
+
+/*
+
+For HILIST and LOWLIST I am using boolean flags: 3 for HILIST and 3 for LOWLIST. True means that a
+specific car is in one of the lists. Assumes I know there are 4 cars and I know their IDs. Wu does *not*
+make these assumptions.
+
+Note 1: I will have to write 4 separate WU_CAR processes for 1,2,3,4. Probably can generalize at some point.
+Maybe using ID as process var and then mod operator for other car ids? Will make WAIT_RESPONSE more complicated
+with nested ifs to sort out priority. I avoid this because I know car 1 is lower than everyone else.
+
+Note 2: Treating whole grid as one non-sharable resource. Not efficient.
+
+Note 3. I am using car id as priority. Wu uses a clock. Low id cars could get locked out under my scheme. You can
+use stress testing ala the warring neighbors to show this.
+
+Note 4. You can use stress testing to make sure time_out is long enough - make it low priority.
+
+Note 5. I find it useful to model like this to try to sort out what Wu is proposing. No guarentees that I
+have concordance :)
+
+*/
+
+CAR = (gettoken -> AUTH),
+AUTH = (chooselane[l:Lanes] -> enter -> exit ->releasetoken -> CAR
+	   |releasetoken->CAR).
+TOKEN = TOKEN[4],
+TOKEN[i:Cars] = ( when (i < 4) car[i].gettoken -> car[i].releasetoken -> TOKEN[i+1]
+				| when (i == 4) car[i].gettoken -> car[i].releasetoken -> TOKEN[1]).
+
+
+||VMEI = (car[Cars]:CAR ||TOKEN).

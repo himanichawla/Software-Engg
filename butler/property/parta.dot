@@ -1,0 +1,9 @@
+digraph parta {
+	rankdir=UD;
+	size="4,4"
+	node[style = filled, shape = circle, color = white]; ST_0;
+	node[style = filled, shape = circle, color = white] ST_1;
+	node[style = filled, shape = circle, color = red]; ST_err;
+	ST_0 -> ST_1 [ label = "arise"];
+	ST_0 -> ST_err [ label = "eat" ];
+}

@@ -1,0 +1,11 @@
+digraph partb {
+	rankdir=UD;
+	size="4,4"
+	node[style = filled, shape = doublecircle, color = red]; ST_0;
+	node[style = filled, shape = circle, color = white] ST_1;
+	node[style = filled, shape = circle, color = white] ST_err;
+	ST_0 -> ST_1 [ label = "phil[0].sitdown"];
+	ST_1 -> ST_0 [ label = "phil[1].arise" ];
+	ST_1 -> ST_err [ label = "phil[0].sitdown" ];
+	ST_0 -> ST_err [ label = "phil[1].arise" ];
+}
